@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Debug files
+debug_*.json
+
+# Progress file (scraper state)
+progress.json
+.scrape_progress.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Distribution (not source)
+LOL助手/

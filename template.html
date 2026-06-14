@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LOL 克制查询 + 英雄推荐 + AI 教练</title>
+<style>
+  :root{
+    --bg:#0e1015; --panel:#171a21; --panel2:#1f232c; --line:#2a2f3a;
+    --txt:#e6e8ec; --muted:#8a92a3; --accent:#3b82f6; --good:#22c55e;
+    --bad:#ef4444; --warn:#f59e0b; --gold:#c8aa6e; --accent2:#8b5cf6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+    font-family:"Microsoft YaHei","Segoe UI",system-ui,sans-serif;font-size:14px}
+  header{padding:16px 24px;border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:16px;background:var(--panel)}
+  header h1{font-size:18px;margin:0;font-weight:600}
+  header .sub{color:var(--muted);font-size:12px}
+  .wrap{max-width:1180px;margin:0 auto;padding:20px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:18px;margin-bottom:18px}
+  .card h2{font-size:15px;margin:0 0 14px;font-weight:600;color:var(--gold)}
+  .card h3{font-size:13px;margin:0 0 10px;color:var(--txt)}
+  .step-label{font-size:12px;color:var(--muted);margin-bottom:8px}
+
+  /* 分路选择 */
+  .lanes{display:flex;gap:10px;flex-wrap:wrap}
+  .lane{flex:1;min-width:92px;background:var(--panel2);border:2px solid transparent;
+    border-radius:10px;padding:14px 8px;text-align:center;cursor:pointer;
+    transition:.15s;user-select:none}
+  .lane:hover{border-color:var(--line)}
+  .lane.active{border-color:var(--accent);background:#1d2735}
+  .lane .ic{font-size:24px;line-height:1}
+  .lane .nm{margin-top:6px;font-size:13px}
+
+  /* 主功能标签切换 */
+  .main-tabs{display:flex;gap:6px;margin-bottom:16px}
+  .main-tabs .mtab{padding:8px 20px;border-radius:8px;background:var(--panel2);
+    border:1px solid var(--line);cursor:pointer;font-size:13px;font-weight:600;
+    transition:.15s;color:var(--muted)}
+  .main-tabs .mtab:hover{border-color:var(--accent);color:var(--txt)}
+  .main-tabs .mtab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+
+  /* 控件行 */
+  .controls{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end;margin-top:8px}
+  .controls .grp{display:flex;flex-direction:column;gap:6px}
+  .controls label{font-size:12px;color:var(--muted)}
+  select,input,button,textarea{font-family:inherit;font-size:14px}
+  select,input[type=text]{background:var(--panel2);border:1px solid var(--line);
+    color:var(--txt);border-radius:8px;padding:9px 11px;outline:none}
+  select:focus,input:focus,textarea:focus{border-color:var(--accent)}
+  button{cursor:pointer;border:none;border-radius:8px;padding:10px 18px;
+    background:var(--accent);color:#fff;font-weight:600;transition:.15s}
+  button:hover{filter:brightness(1.1)}
+  button.ghost{background:var(--panel2);border:1px solid var(--line);color:var(--txt)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+
+  /* 英雄选择网格 */
+  .champ-search{width:100%;margin-bottom:10px}
+  .champ-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));
+    gap:8px;max-height:280px;overflow-y:auto;padding:4px}
+  .champ{display:flex;flex-direction:column;align-items:center;gap:3px;
+    cursor:pointer;padding:5px 2px;border-radius:8px;border:2px solid transparent}
+  .champ:hover{background:var(--panel2)}
+  .champ.sel{border-color:var(--accent);background:#1d2735}
+  .champ img{width:46px;height:46px;border-radius:8px;background:var(--panel2)}
+  .champ span{font-size:11px;color:var(--muted);text-align:center;line-height:1.1;
+    max-width:64px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* 结果卡片 */
+  .summary-top{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px}
+  .pick{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+    padding:10px 12px;display:flex;align-items:center;gap:10px;min-width:190px;
+    cursor:pointer;transition:.15s}
+  .pick:hover{border-color:var(--accent)}
+  .pick .rank{font-size:18px;font-weight:700;color:var(--gold);width:24px;text-align:center}
+  .pick img{width:44px;height:44px;border-radius:8px}
+  .pick .meta{display:flex;flex-direction:column}
+  .pick .meta .n{font-weight:600}
+  .pick .meta .wr{font-size:12px}
+  .wr.g{color:var(--good)} .wr.b{color:var(--bad)} .wr.n{color:var(--muted)}
+  .alt-note{color:var(--warn);font-size:12px;margin:6px 0}
+
+  table{width:100%;border-collapse:collapse;margin-top:6px}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);font-size:13px}
+  th{color:var(--muted);font-weight:500;font-size:12px}
+  td .cell{display:flex;align-items:center;gap:7px}
+  td img{width:28px;height:28px;border-radius:6px}
+  .tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:10px;
+    background:var(--panel2);color:var(--muted);margin-left:6px}
+  .tag.off{background:#3a2a12;color:var(--warn)}
+  .tag.build{background:#1a2238;color:var(--accent);margin-left:4px;cursor:pointer}
+
+  .matrix-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 12px}
+  .matrix-tabs .t{padding:6px 12px;border-radius:7px;background:var(--panel2);
+    border:1px solid var(--line);cursor:pointer;font-size:12px}
+  .matrix-tabs .t.active{background:var(--accent);border-color:var(--accent);color:#fff}
+
+  .empty{color:var(--muted);padding:18px;text-align:center}
+  .hidden{display:none!important}
+
+  /* ====== 英雄详情/出装面板 ====== */
+  .build-panel{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+    padding:14px;margin-top:12px}
+  .build-panel h3{margin:0 0 12px;font-size:14px;display:flex;align-items:center;gap:10px}
+  .build-panel h3 img{width:36px;height:36px;border-radius:8px}
+  .build-row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+  .build-block{flex:1;min-width:140px}
+  .build-block .lbl{font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600}
+  .build-block .icons{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+  .build-block .icons img{width:36px;height:36px;border-radius:6px;background:#111}
+  .build-block .icons .txt{font-size:12px;color:var(--txt)}
+
+  /* 符文 — OP.GG 风格 */
+  .rune-page{background:#111820;border:1px solid var(--line);border-radius:10px;padding:14px}
+  .rune-trees{display:flex;gap:24px;align-items:flex-start;margin-bottom:12px}
+  .rune-tree-col{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:100px}
+  .rune-tree-col .tree-header{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+  .rune-tree-col .tree-header img{width:24px;height:24px;border-radius:50%;background:#1a1a2e}
+  .rune-tree-col .tree-header span{font-size:12px;font-weight:600;color:var(--gold)}
+  .rune-keystone{display:flex;flex-direction:column;align-items:center;gap:3px}
+  .rune-keystone img{width:44px;height:44px;border-radius:50%;background:#1a1a2e;border:2px solid var(--gold)}
+  .rune-keystone span{font-size:10px;color:var(--txt);text-align:center;max-width:80px}
+  .rune-perk-row{display:flex;align-items:center;gap:6px}
+  .rune-perk-row img{width:32px;height:32px;border-radius:50%;background:#1a1a2e}
+  .rune-perk-row span{font-size:10px;color:var(--muted)}
+  .rune-shards-row{display:flex;gap:12px;justify-content:center;padding-top:10px;border-top:1px solid var(--line)}
+  .rune-shard-item{display:flex;flex-direction:column;align-items:center;gap:2px}
+  .rune-shard-item img{width:22px;height:22px;border-radius:50%;background:#1a1a2e;opacity:.85}
+  .rune-shard-item span{font-size:10px;color:var(--muted)}
+
+  /* 加点顺序 */
+  .skill-seq{display:flex;gap:3px;flex-wrap:wrap;align-items:center}
+  .skill-seq span{display:inline-block;width:24px;height:24px;line-height:24px;
+    text-align:center;border-radius:4px;font-size:12px;font-weight:700;
+    background:#111820;color:var(--txt)}
+
+  /* 连招 */
+  .combo-block{background:#111820;border:1px solid var(--line);border-radius:8px;
+    padding:8px 12px;margin-top:6px}
+  .combo-block .ctag{font-size:11px;color:var(--gold);font-weight:700;margin-bottom:3px}
+  .combo-block .cseq{font-size:13px;color:var(--txt);font-family:"Cascadia Code","Consolas",monospace}
+
+  /* 英雄推荐 (Tier) */
+  .tier-pick{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+    padding:10px 12px;display:flex;align-items:center;gap:10px;min-width:190px;
+    cursor:pointer;transition:.15s}
+  .tier-pick:hover{border-color:var(--accent2)}
+  .tier-pick .trank{font-size:18px;font-weight:700;width:24px;text-align:center}
+  .tier-pick .trank.t1{color:#f0c040} .tier-pick .trank.t2{color:#c0c0d0}
+  .tier-pick .trank.t3{color:#c08050}
+  .tier-pick img{width:44px;height:44px;border-radius:8px}
+  .tier-pick .tmeta{display:flex;flex-direction:column}
+  .tier-pick .tmeta .tn{font-weight:600}
+  .tier-pick .tmeta .twr{font-size:12px}
+  .tier-pick .tmeta .tstats{font-size:11px;color:var(--muted)}
+
+  /* AI 教练 */
+  .ai-comp{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .ai-comp .side h3{font-size:13px;margin:0 0 8px}
+  .slot-row{display:flex;gap:6px;flex-wrap:wrap;min-height:54px;
+    background:var(--panel2);border:1px dashed var(--line);border-radius:8px;padding:8px}
+  .slot{position:relative}
+  .slot img{width:40px;height:40px;border-radius:7px}
+  .slot .x{position:absolute;top:-6px;right:-6px;background:var(--bad);color:#fff;
+    border-radius:50%;width:16px;height:16px;font-size:11px;line-height:16px;
+    text-align:center;cursor:pointer}
+  .ai-out{background:#0b0d12;border:1px solid var(--line);border-radius:8px;
+    padding:16px;margin-top:14px;white-space:pre-wrap;line-height:1.6;min-height:60px;
+    font-size:13.5px;max-height:600px;overflow-y:auto}
+  .ai-out h1,.ai-out h2,.ai-out h3{color:var(--gold)}
+  .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--muted);
+    border-top-color:var(--accent);border-radius:50%;animation:s .7s linear infinite;
+    vertical-align:middle;margin-right:6px}
+  @keyframes s{to{transform:rotate(360deg)}}
+
+  /* 响应式 */
+  @media(max-width:720px){.ai-comp{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚔️ LOL 克制查询 &amp; 英雄推荐 &amp; AI 教练</h1>
+  <span class="sub">数据来源 op.gg · 仅供参考</span>
+</header>
+
+<div class="wrap">
+
+  <!-- 步骤1: 选分路 -->
+  <div class="card">
+    <div class="step-label">第一步 · 选择你的分路</div>
+    <div class="lanes" id="lanes"></div>
+  </div>
+
+  <!-- 步骤2: 克制查询 / 英雄推荐 (Tab 切换) -->
+  <div class="card" id="mainCard">
+    <div class="main-tabs" id="mainTabs">
+      <div class="mtab active" data-tab="counter">🎯 克制查询</div>
+      <div class="mtab" data-tab="tier">🏆 英雄推荐</div>
+      <div class="mtab" data-tab="build">📜 符文出装</div>
+    </div>
+
+    <!-- 克制查询面板 -->
+    <div id="tabCounter">
+      <div class="controls">
+        <div class="grp">
+          <label>对方对位英雄</label>
+          <input type="text" id="oppSearch" class="champ-search" placeholder="搜索英雄(中文名/拼音首字母)…" style="min-width:240px">
+        </div>
+        <div class="grp">
+          <label>地区</label>
+          <select id="regionSel">
+            <option value="global">全球</option>
+            <option value="kr">韩国</option>
+            <option value="cn">中国</option>
+          </select>
+        </div>
+        <div class="grp">
+          <label>段位</label>
+          <select id="tierSel">
+            <option value="diamond">钻石+</option>
+            <option value="master">大师</option>
+            <option value="grandmaster">宗师</option>
+            <option value="challenger">王者</option>
+          </select>
+        </div>
+      </div>
+      <div class="champ-grid" id="oppGrid" style="margin-top:12px"></div>
+      <div id="counterResult"></div>
+    </div>
+
+    <!-- 英雄推荐面板 -->
+    <div id="tabTier" class="hidden">
+      <div class="controls">
+        <div class="grp">
+          <label>地区</label>
+          <select id="tierRegionSel">
+            <option value="global">全球</option>
+            <option value="kr">韩国</option>
+            <option value="cn">中国</option>
+          </select>
+        </div>
+        <div class="grp">
+          <label>段位</label>
+          <select id="tierTierSel">
+            <option value="diamond">钻石+</option>
+            <option value="master">大师</option>
+            <option value="grandmaster">宗师</option>
+            <option value="challenger">王者</option>
+          </select>
+        </div>
+      </div>
+      <div id="tierResult" style="margin-top:12px"></div>
+    </div>
+
+    <!-- 符文出装查询面板 -->
+    <div id="tabBuild" class="hidden">
+      <div class="controls">
+        <div class="grp">
+          <label>搜索英雄</label>
+          <input type="text" id="buildSearch" class="champ-search" placeholder="搜索英雄查看符文出装…" style="min-width:240px">
+        </div>
+      </div>
+      <div class="champ-grid" id="buildGrid" style="margin-top:12px"></div>
+      <div id="buildResult"></div>
+    </div>
+  </div>
+
+  <!-- 步骤3: 英雄符文出装加点连招推荐 (通过点击英雄自动跳转) -->
+  <div class="card hidden" id="buildCard">
+    <h2 id="buildTitle" style="display:flex;align-items:center;gap:10px"></h2>
+    <div class="controls" style="margin-bottom:10px">
+      <div class="grp">
+        <label>分路</label>
+        <select id="buildRoleSel">
+          <option value="top">上路</option>
+          <option value="jungle">打野</option>
+          <option value="mid">中路</option>
+          <option value="adc">下路</option>
+          <option value="support">辅助</option>
+        </select>
+      </div>
+    </div>
+    <div id="buildContent"></div>
+  </div>
+
+  <!-- 步骤4: AI 教练 -->
+  <div class="card">
+    <h2>🤖 AI 教练阵容分析</h2>
+    <div class="step-label">分别选择双方英雄(可不完整, 至少 1 个即可分析)。点击下方英雄网格添加到"己方/对方"。分析自动使用预置的大模型接口。</div>
+    <div style="margin:10px 0">
+      <input type="text" id="aiSearch" class="champ-search" placeholder="搜索英雄加入阵容…">
+      <div class="champ-grid" id="aiGrid"></div>
+    </div>
+    <div class="step-label">点击上方英雄后选择加入哪一方 ↓ 或先点一方激活</div>
+    <div class="matrix-tabs" id="sideTabs">
+      <div class="t active" data-side="ally">添加到 己方</div>
+      <div class="t" data-side="enemy">添加到 对方</div>
+    </div>
+    <div class="ai-comp">
+      <div class="side">
+        <h3 style="color:var(--good)">己方阵容</h3>
+        <div class="slot-row" id="allyRow"></div>
+      </div>
+      <div class="side">
+        <h3 style="color:var(--bad)">对方阵容</h3>
+        <div class="slot-row" id="enemyRow"></div>
+      </div>
+    </div>
+    <div style="margin-top:14px">
+      <button id="aiRun">开始分析</button>
+    </div>
+    <div class="ai-out hidden" id="aiOut"></div>
+  </div>
+
+  <div style="color:var(--muted);font-size:11px;text-align:center;padding:10px">
+    数据来源 op.gg · 头像版权归 Riot Games · AI 分析仅供参考
+  </div>
+</div>
+
+<script>
+/* ====== 注入数据(由 build.py 替换) ====== */
+const CHAMPIONS = __CHAMPIONS__;     // [{key,id,slug,name,title}]
+const COUNTER   = __COUNTER__;       // data[role][slug][region][tier] = [{opp,win,games}]
+const BUILD     = __BUILD__;         // data[role][slug] = {runes,spells,skill_order,skill_master,core_items,item4,item5,combos}
+const TIER_DATA = __TIER__;          // data[role][region][tier] = [{key,rank,tier,win,pick,games}]
+const META      = __META__;          // {items:{id:{name,icon}}, spells:{key:{name,icon}}, runes:{id:{name,icon}}, runeTrees:{id:{name,icon}}}
+const LANE_POOL = __LANE_POOL__;     // {top:[key,...], jungle:[...], ...}
+const ICON_BASE = "__ICON_BASE__";   // 头像 URL 前缀, {id} 会被替换
+</script>
+<script src="app.js"></script>
+</body>
+</html>
