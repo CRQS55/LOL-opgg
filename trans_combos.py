@@ -19,8 +19,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BUILD_FILE = os.path.join(HERE, "build_data.json")
 
 API_URL = "https://api.deepseek.com/anthropic/v1/messages"
-API_KEY = "sk-fc2ccfdf96c84519bac7ec5a56bd087b"
 MODEL = "deepseek-v4-pro"
+
+def _load_api_key():
+    """从 .env 文件读取 API Key"""
+    env_file = os.path.join(HERE, ".env")
+    if os.path.isfile(env_file):
+        with open(env_file, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("DEEPSEEK_API_KEY="):
+                    return line.split("=", 1)[1]
+    return None
+
+API_KEY = _load_api_key()
 
 
 def load_json(path):
@@ -113,6 +125,11 @@ Return ONLY this JSON:
 
 def main():
     dry_run = "--dry" in sys.argv
+
+    if not API_KEY:
+        print("错误: 未找到 DEEPSEEK_API_KEY。请在 .env 文件中配置 API Key。")
+        print("参考 .env.example 文件。")
+        sys.exit(1)
 
     build = load_json(BUILD_FILE)
 

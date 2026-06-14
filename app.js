@@ -596,9 +596,8 @@
   }
 
   // ========== 步骤4: AI 教练 ==========
-  // API 配置 (Anthropic 原生格式, 通过本地 proxy 转发)
+  // API 配置 (通过本地 server.py 代理转发, 由服务端注入 API Key, 前端不持有)
   const AI_BASE = "";  // 同源 (server.py 一体式服务器), 也可改为 http://localhost:8899 用独立 proxy
-  const AI_KEY = "sk-fc2ccfdf96c84519bac7ec5a56bd087b";
   const AI_MODEL = "deepseek-v4-pro";
 
   function renderAiGrid(filter) {
@@ -671,7 +670,6 @@
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-api-key": AI_KEY,
           "anthropic-version": "2023-06-01",
           "anthropic-dangerous-direct-browser-access": "true",
         },

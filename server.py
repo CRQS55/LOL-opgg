@@ -23,6 +23,19 @@ AI_TARGET = "https://api.deepseek.com/anthropic"  # DeepSeek API (Anthropic 兼�
 API_PREFIX = "/v1/"                                # 以该前缀开头的请求走代理
 DIR = os.path.dirname(os.path.abspath(__file__))   # 静态文件根目录
 
+# 从 .env 读取 API Key（不硬编码，不暴露给前端）
+def _load_api_key():
+    env_file = os.path.join(DIR, ".env")
+    if os.path.isfile(env_file):
+        with open(env_file, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("DEEPSEEK_API_KEY="):
+                    return line.split("=", 1)[1]
+    return None
+
+AI_KEY = _load_api_key()
+
 # 常见 MIME 补充
 mimetypes.add_type("text/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
@@ -86,12 +99,16 @@ class UnifiedHandler(BaseHTTPRequestHandler):
                 data=body,
                 method="POST",
             )
-            # 转发必要的请求头
+            # 转发必要的请求头（但不转发客户端发来的 API Key，用服务端 Key 替代）
             for k, v in self.headers.items():
                 low = k.lower()
-                if low in ("host", "origin", "referer"):
+                if low in ("host", "origin", "referer", "x-api-key"):
                     continue
                 req.add_header(k, v)
+            # 注入服务端持有的 API Key
+            if AI_KEY:
+                req.add_header("x-api-key", AI_KEY)
+            req.add_header("anthropic-version", "2023-06-01")
 
             try:
                 with urllib.request.urlopen(req, timeout=120) as resp:
@@ -143,6 +160,8 @@ if __name__ == "__main__":
     print(f"⚡ 统一服务器启动")
     print(f"   静态文件: {DIR}")
     print(f"   API 代理: localhost:{PORT}{API_PREFIX}* → {AI_TARGET}")
+    if not AI_KEY:
+        print(f"   ⚠ 未配置 DEEPSEEK_API_KEY（请检查 .env 文件），AI 功能将不可用")
     url = f"http://localhost:{PORT}"
     print(f"   打开浏览器: {url}")
     print(f"   按 Ctrl+C 停止\n")

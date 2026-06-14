@@ -16,6 +16,9 @@ progress.json
 *.swp
 *.swo
 
+# Environment (API keys)
+.env
+
 # OS
 .DS_Store
 Thumbs.db

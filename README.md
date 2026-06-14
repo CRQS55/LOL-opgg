@@ -135,7 +135,8 @@ OP.GG (Playwright 抓取)         Data Dragon (Riot API)
 - 数据有版本时效性，LOL 更新后需重新抓取
 - OP.GG 使用 Cloudflare 防护，必须用 Playwright 真实浏览器抓取
 - AI 教练功能需要 `server.py` 运行中
-- API Key 已预置在代码中，如需更换编辑 `app.js` 中的 `AI_KEY`
+- API Key 配置在 `.env` 文件中（`DEEPSEEK_API_KEY=...`），由 `server.py`/Python 脚本自动读取
+- 参考 `.env.example` 创建你的 `.env` 文件
 
 ## 📜 License
 
