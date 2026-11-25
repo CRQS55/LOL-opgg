@@ -117,6 +117,19 @@ PROGRESS_INTERVAL = 2.0        # 进度落盘节流(秒)
 _VER = {"v": None}
 BOOT_IDS = {3006, 3009, 3020, 3047, 3111, 3117, 3158}
 CONSUMABLES = {2003, 2004, 2031, 2032, 2033, 2055, 2138, 2139, 2140, 3340, 3341, 3363, 3364, 3599}
+# 起始装(多兰系列 + 常见出门装)。op.gg 出装页把"起始装备"排在最前面,
+# 旧逻辑直接取前 3 个 item, 结果把多兰之刃/多兰之弓当成了核心装。
+# 注意: 这里只能放"真正的出门装"; 价格 >= 1200 的成装一律不能进(否则会把核心装剔掉)。
+STARTING_ITEMS = {
+    1054, 1055, 1056, 1086, 1120,      # 多兰之盾/刃/戒/弓/盔
+    3070,                               # 女神之泪
+    1082,                               # 黑暗封印
+    1028, 1029, 1031, 1052, 1053, 1083,  # 红水晶/布甲/锁子甲/增幅典籍/吸血鬼节杖/反曲之弓
+    2003, 2004, 2031, 2033, 2055,       # 药水/绿瓶
+    3340, 3341, 3363, 3364,             # 饰品
+}
+# 低于这个价格的一律不算"成装核心"(起始装/消耗品/鞋子都在 1200 以下)
+CORE_MIN_GOLD = 1200
 
 # op.gg 的"数据不足"文案有多种写法(旧版只匹配了其中一种)
 NODATA_MARKERS = ("数据样本数不足", "数据样本不足", "样本数据不足", "数据不足")
@@ -218,6 +231,9 @@ def fetch_meta():
         meta["items"][str(iid)] = {
             "name": it.get("name", iid),
             "icon": img + "item/" + it["image"]["full"],
+            # gold/tags 用来把"起始装/鞋子/消耗品"从核心装里剔除
+            "gold": (it.get("gold") or {}).get("total", 0),
+            "tags": it.get("tags") or [],
         }
 
     summs = req.get(DDRAGON_SUMMS.format(ver=ver), timeout=20).json()["data"]
@@ -251,17 +267,237 @@ def fetch_meta():
 
 
 # ======================== URL 构造(纯函数, 便于穷举验证) ========================
-def url_counter(base, slug, role, region, tier):
-    return base.rstrip("/") + COUNTER_PATH.format(locale=LOCALE, slug=slug, role=role,
-                                                  region=region, tier=tier)
+def _with_patch(url, patch):
+    """op.gg 用 &patch=16.22 选历史版本(实测有效, version= 无效)。"""
+    if not patch:
+        return url
+    return url + ("&" if "?" in url else "?") + "patch=" + str(patch)
 
 
-def url_build(base, slug, role):
-    return base.rstrip("/") + BUILD_PATH.format(locale=LOCALE, slug=slug, role=role)
+def url_counter(base, slug, role, region, tier, patch=None):
+    return _with_patch(
+        base.rstrip("/") + COUNTER_PATH.format(locale=LOCALE, slug=slug, role=role,
+                                              region=region, tier=tier), patch)
 
 
-def url_tier(base, role, region, tier):
-    return base.rstrip("/") + TIER_PATH.format(locale=LOCALE, role=role, region=region, tier=tier)
+def url_build(base, slug, role, patch=None):
+    return _with_patch(
+        base.rstrip("/") + BUILD_PATH.format(locale=LOCALE, slug=slug, role=role), patch)
+
+
+def url_tier(base, role, region, tier, patch=None):
+    return _with_patch(
+        base.rstrip("/") + TIER_PATH.format(locale=LOCALE, role=role, region=region,
+                                            tier=tier), patch)
+
+
+def parse_page_patch(*texts):
+    """从页面标题/描述里取版本号（如 '16.23 版本'）。返回 '16.23' 或 None。"""
+    for t in texts:
+        m = re.search(r"(\d{1,2}\.\d{1,2})\s*版本", t or "")
+        if m:
+            return m.group(1)
+    return None
+
+
+# ======================== 本机客户端版本探测 ========================
+# LOL 可能装在任意盘符/任意目录（WeGameApps、Games、Riot Games、自定义目录），
+# 所以按"注册表多键 -> 卸载表 -> Riot 安装清单 -> 环境变量 -> 各盘符常见目录"
+# 的顺序收集候选，再逐个读 exe 文件版本；仍找不到可加 --deep-scan 扫盘。
+CLIENT_EXE_REL = (
+    ("LeagueClient", "LeagueClient.exe"),
+    ("Game", "League of Legends.exe"),
+    ("TCLS", "client.exe"),
+)
+COMMON_GAME_DIRS = ("英雄联盟", "League of Legends", "LOL", "LeagueOfLegends")
+COMMON_PARENTS = ("WeGameApps", "Games", "Tencent", "Riot Games",
+                  os.path.join("Program Files", "WeGameApps"),
+                  os.path.join("Program Files", "Riot Games"),
+                  os.path.join("Program Files (x86)", "WeGameApps"),
+                  os.path.join("Program Files (x86)", "Riot Games"))
+
+
+def exe_candidates_for_root(root):
+    return [os.path.join(root, *parts) for parts in CLIENT_EXE_REL]
+
+
+def registry_install_roots():
+    """从注册表 / 卸载表 / Riot 安装清单里收集安装根目录。"""
+    roots = []
+    try:
+        import winreg
+    except Exception:
+        return roots
+
+    entries = [
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Tencent\LOL", "InstallPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Tencent\LOL", "InstallPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Tencent\LOL", "InstallPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Riot Games\League of Legends", "InstallLocation"),
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SOFTWARE\WOW6432Node\Riot Games\League of Legends", "InstallLocation"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Riot Games\League of Legends", "InstallLocation"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Tencent\WeGame", "InstallPath"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Tencent\WeGame", "InstallPath"),
+    ]
+    for hive, sub, name in entries:
+        try:
+            with winreg.OpenKey(hive, sub) as k:
+                val, _ = winreg.QueryValueEx(k, name)
+                if val and os.path.isdir(str(val)):
+                    roots.append(os.path.normpath(str(val)))
+        except Exception:
+            continue
+
+    # 卸载表：DisplayName 含"英雄联盟 / League of Legends"
+    for hive, base in (
+            (winreg.HKEY_LOCAL_MACHINE,
+             r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_LOCAL_MACHINE,
+             r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_CURRENT_USER,
+             r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall")):
+        try:
+            with winreg.OpenKey(hive, base) as k:
+                for i in range(winreg.QueryInfoKey(k)[0]):
+                    try:
+                        sub = winreg.EnumKey(k, i)
+                        with winreg.OpenKey(k, sub) as sk:
+                            disp = str(winreg.QueryValueEx(sk, "DisplayName")[0] or "")
+                            if "英雄联盟" not in disp and "League of Legends" not in disp:
+                                continue
+                            loc = str(winreg.QueryValueEx(sk, "InstallLocation")[0] or "")
+                            if loc and os.path.isdir(loc):
+                                roots.append(loc)
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+
+    # Riot 客户端安装清单（官方客户端会把所有安装路径写在这里）
+    pd = os.environ.get("PROGRAMDATA") or "C:\\ProgramData"
+    try:
+        with open(os.path.join(pd, "Riot Games", "RiotClientInstalls.json"),
+                 encoding="utf-8") as f:
+            data = json.load(f)
+        for k in (data.get("associated_client") or {}):
+            if os.path.isdir(k):
+                roots.append(k)
+    except Exception:
+        pass
+    return roots
+
+
+def drive_letters():
+    return [f"{c}:\\" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.isdir(f"{c}:\\")]
+
+
+def candidate_client_paths(roots=None, env=None, drives=None, deep=False):
+    """生成候选 exe 路径（纯函数，便于穷举验证）：注册表根 -> 环境变量 -> 盘符常见目录。"""
+    env = os.environ if env is None else env
+    out = []
+    for r in (roots or []):
+        out.extend(exe_candidates_for_root(r))
+
+    for key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMDATA", "LOCALAPPDATA"):
+        base = env.get(key)
+        if not base:
+            continue
+        for parent in COMMON_PARENTS:
+            for game in COMMON_GAME_DIRS:
+                out.extend(exe_candidates_for_root(os.path.join(base, parent, game)))
+        for game in COMMON_GAME_DIRS:
+            out.extend(exe_candidates_for_root(os.path.join(base, game)))
+
+    for d in (drives or []):
+        for parent in COMMON_PARENTS:
+            for game in COMMON_GAME_DIRS:
+                out.extend(exe_candidates_for_root(os.path.join(d, parent, game)))
+        if deep:
+            try:
+                for name in os.listdir(d):
+                    p = os.path.join(d, name)
+                    if not os.path.isdir(p):
+                        continue
+                    if name in COMMON_GAME_DIRS:
+                        out.extend(exe_candidates_for_root(p))
+                        continue
+                    try:
+                        for sub in os.listdir(p):
+                            sp = os.path.join(p, sub)
+                            if os.path.isdir(sp) and sub in COMMON_GAME_DIRS:
+                                out.extend(exe_candidates_for_root(sp))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    seen, uniq = set(), []
+    for p in out:
+        key = os.path.normcase(os.path.normpath(p))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(p)
+    return uniq
+
+
+def find_local_client(deep=False, roots=None, env=None, drives=None):
+    """返回 (版本, exe 路径)。找不到返回 (None, None)。
+
+    会跳过明显不是游戏版本的 exe（如 TCLS 下的启动器 client.exe，版本 4.0）。
+    """
+    roots = registry_install_roots() if roots is None else roots
+    drives = drive_letters() if drives is None else drives
+    for path in candidate_client_paths(roots, env, drives, deep):
+        ver = _pe_file_version(path)
+        if not ver:
+            continue
+        m = re.match(r"(\d{1,2})\.(\d{1,2})", ver)
+        if not m:
+            continue
+        major = int(m.group(1))
+        if major < 8 or major > 40:      # LOL 游戏版本 8.x 起；4.0 是启动器版本
+            continue
+        return f"{major}.{int(m.group(2))}", path
+    return None, None
+
+
+def detect_local_patch(deep=False):
+    """读本机客户端版本（如 16.23）；找不到返回 None。"""
+    return find_local_client(deep=deep)[0]
+
+
+def _pe_file_version(path):
+    """用 Win32 版本 API 读 exe 的 FileVersion（失败返回 None）。"""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        size = ctypes.windll.version.GetFileVersionInfoSizeW(path, None)
+        if not size:
+            return None
+        buf = ctypes.create_string_buffer(size)
+        if not ctypes.windll.version.GetFileVersionInfoW(path, 0, size, buf):
+            return None
+
+        class VS_FIXEDFILEINFO(ctypes.Structure):
+            _fields_ = [("dwSignature", wintypes.DWORD), ("dwStrucVersion", wintypes.DWORD),
+                        ("dwFileVersionMS", wintypes.DWORD), ("dwFileVersionLS", wintypes.DWORD)]
+
+        res = ctypes.c_void_p()
+        length = wintypes.UINT()
+        if not ctypes.windll.version.VerQueryValueW(buf, "\\", ctypes.byref(res),
+                                                    ctypes.byref(length)):
+            return None
+        ffi = ctypes.cast(res, ctypes.POINTER(VS_FIXEDFILEINFO)).contents
+        major = ffi.dwFileVersionMS >> 16
+        minor = ffi.dwFileVersionMS & 0xFFFF
+        return f"{major}.{minor}"
+    except Exception:
+        return None
 
 
 # ======================== 判定函数(纯函数, 便于穷举验证) ========================
@@ -438,6 +674,27 @@ EXTRACT_BUILD_JS = r"""() => {
     const itemImgs = allImgs.filter(img => /\/item\/\d+\.png/.test(img.src))
         .map(img => ({alt: img.alt, id: getNum(img.src)}));
 
+    // op.gg 把出装拆成 6 张独立的表(caption 标明用途), 按表取才拿得到第 4/5/6 件
+    function tableRows(caption) {
+        for (const t of document.querySelectorAll('table')) {
+            const cap = ((t.querySelector('caption') || {}).textContent || '').trim();
+            if (cap !== caption) continue;
+            return [...t.querySelectorAll('tbody tr')]
+                .map(tr => [...tr.querySelectorAll("img[src*='/item/']")]
+                    .map(i => getNum(i.getAttribute('src'))).filter(Boolean))
+                .filter(a => a.length);
+        }
+        return [];
+    }
+    const itemTables = {
+        start: tableRows('Items Table'),
+        boots: tableRows('Boots Table'),
+        core: tableRows('Builds Table'),
+        depth4: tableRows('Depth 4 Items Table'),
+        depth5: tableRows('Depth 5 Items Table'),
+        depth6: tableRows('Depth 6 Items Table'),
+    };
+
     const spellNames = ['闪现', '点燃', '传送', '惩戒', '疾跑', '治疗', '屏障', '虚弱', '净化'];
     const bodyText = document.body ? (document.body.textContent || '') : '';
     const foundSpells = spellNames.filter(s => bodyText.includes(s));
@@ -473,7 +730,11 @@ EXTRACT_BUILD_JS = r"""() => {
     }
 
     return {perks: perkImgs, styles: styleImgs, items: itemImgs,
-            foundSpells: foundSpells, skillOrder: skillOrder, combos: combos};
+            itemTables: itemTables,
+            foundSpells: foundSpells, skillOrder: skillOrder, combos: combos,
+            shardCandidates: allImgs.filter(img => /\/perkShard\//.test(img.src)).slice(0, 9)
+                .map(img => ({id: getNum(img.src), cls: img.getAttribute('class') || ''})),
+            desc: (document.querySelector('meta[name="description"]') || {}).content || ''};
 }"""
 
 EXTRACT_TIER_JS = r"""() => {
@@ -567,15 +828,214 @@ def finalize_tier_rows(raw_rows, champ_by_slug, name_to_key):
     return rows
 
 
+# summoner spell id 一律以 Data Dragon 为准(旧表把"点燃"写成 2、"传送"写成 1,
+# 导致前端显示错图标或问号)。可用 --only meta 后从 meta.spells 复核。
 SPELL_NAME_MAP = {
-    "闪现": 4, "幽灵疾步": 14, "疾跑": 14, "治疗": 7, "治疗术": 7,
-    "屏障": 21, "虚弱": 3, "点燃": 2, "引燃": 2, "传送": 1,
-    "惩戒": 11, "净化": 5,
+    "闪现": 4,          # SummonerFlash
+    "点燃": 14, "引燃": 14,   # SummonerDot
+    "疾跑": 6, "幽灵疾步": 6,  # SummonerHaste
+    "治疗": 7, "治疗术": 7,    # SummonerHeal
+    "净化": 1,          # SummonerBoost
+    "传送": 12,         # SummonerTeleport
+    "惩戒": 11,         # SummonerSmite
+    "屏障": 21,         # SummonerBarrier
+    "虚弱": 3,          # SummonerExhaust
+    "清晰": 13, "清晰术": 13,  # SummonerMana
 }
 
 
-def parse_build_payload(data):
-    """把 build 页 JS 抓到的原始数据解析成 build_data.json 里的结构。"""
+def item_tags(iid, item_meta):
+    info = (item_meta or {}).get(str(iid)) or {}
+    tags = info.get("tags") or []
+    return tags if isinstance(tags, list) else []
+
+
+def item_gold(iid, item_meta):
+    info = (item_meta or {}).get(str(iid)) or {}
+    g = info.get("gold")
+    return g if isinstance(g, (int, float)) and g > 0 else None
+
+
+def is_starting_item(iid, item_meta=None):
+    """起始装/鞋子/消耗品/饰品 —— 这些不能算进核心装。"""
+    try:
+        iid = int(iid)
+    except (TypeError, ValueError):
+        return True
+    if iid in STARTING_ITEMS or iid in CONSUMABLES or iid in BOOT_IDS:
+        return True
+    tags = [t.lower() for t in item_tags(iid, item_meta)]
+    if any(t in ("boots", "consumable", "trinket") for t in tags):
+        return True
+    gold = item_gold(iid, item_meta)
+    if gold is not None and gold < CORE_MIN_GOLD:
+        return True
+    return False
+
+
+def pick_build_items(item_ids, item_meta=None, limit=5):
+    """从页面上的装备图标序列里挑出真正的成装核心(跳过起始装/鞋子/消耗品), 去重保序。"""
+    picked = []
+    for iid in item_ids or []:
+        if is_starting_item(iid, item_meta):
+            continue
+        try:
+            n = int(iid)
+        except (TypeError, ValueError):
+            continue
+        if n in picked:
+            continue
+        picked.append(n)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+# ======================== 从页面 description 解析(权威口径) ========================
+# op.gg 每个出装页的 <meta name="description"> 里有一句:
+#   "…：残疫 → 影焰 → 中娅沙漏（胜率 51.83%，2,350 场），法师之靴，电刑符文，闪现 + 引燃，技能主升 Q > W > E。…"
+# 这是服务端生成的固定格式, 比在 DOM 里猜顺序可靠得多。
+DESC_CHAIN_RE = re.compile(r"）：(.+?)（胜率")
+DESC_BOOTS_RE = re.compile(r"（胜率[^）]*），([^，]+)，")
+DESC_SPELL_RE = re.compile(r"闪现\s*[+＋]\s*([^，。]+?)(?:，|。|$)")
+DESC_KEYSTONE_RE = re.compile(r"，([^，]+?)符文")
+DESC_MASTER_RE = re.compile(r"技能主升\s*([QWER])\s*[>＞]\s*([QWER])\s*[>＞]\s*([QWER])")
+
+
+def normalize_name(name):
+    return re.sub(r"\s+", "", name or "").strip()
+
+
+def item_id_by_name(item_meta, name):
+    """按中文名反查装备 id；优先短 id（3~4 位），跳过 22xxxx/77xxxx 变体。"""
+    want = normalize_name(name)
+    if not want:
+        return None
+    fallback = None
+    for iid, info in (item_meta or {}).items():
+        if normalize_name((info or {}).get("name")) != want:
+            continue
+        if iid.startswith("77"):
+            continue
+        if iid.startswith("22"):
+            fallback = fallback or iid
+            continue
+        return int(iid)
+    return int(fallback) if fallback else None
+
+
+def parse_build_desc(desc):
+    """解析 op.gg 页面 description。返回 {core_names, boots, keystone, spells, skill_master}。"""
+    out = {"core_names": [], "boots": None, "keystone": None, "spells": [], "skill_master": []}
+    text = (desc or "").strip()
+    if not text:
+        return out
+
+    m = DESC_CHAIN_RE.search(text)
+    if m:
+        out["core_names"] = [x.strip() for x in m.group(1).split("→") if x.strip()]
+
+    m = DESC_BOOTS_RE.search(text)
+    if m:
+        out["boots"] = m.group(1).strip()
+
+    m = DESC_SPELL_RE.search(text)
+    if m:
+        out["spells"] = ["闪现", m.group(1).strip()]
+
+    m = DESC_KEYSTONE_RE.search(text)
+    if m:
+        out["keystone"] = m.group(1).strip()
+
+    m = DESC_MASTER_RE.search(text)
+    if m:
+        out["skill_master"] = [m.group(1), m.group(2), m.group(3)]
+    return out
+
+
+def check_desc_consistency(desc, parsed, item_meta):
+    """把 description(权威) 与解析结果对比, 返回差异描述列表（用于运行时自检）。"""
+    info = parse_build_desc(desc)
+    issues = []
+    if info["core_names"]:
+        want = [item_id_by_name(item_meta, n) for n in info["core_names"]]
+        want = [i for i in want if i and not is_starting_item(i, item_meta)]
+        got = list(parsed.get("core_items") or [])
+        if len(want) >= 2 and got[:len(want)] != want:
+            issues.append(f"核心装 页面={want} 数据={got}")
+    if len(info["spells"]) == 2:
+        want = [SPELL_NAME_MAP.get(n) for n in info["spells"]]
+        if all(want) and list(parsed.get("spells") or [])[:2] != want:
+            issues.append(f"召唤师技能 页面={want} 数据={parsed.get('spells')}")
+    return issues
+
+
+def repair_build_items(build, item_meta):
+    """就地修正已有 build_data: 把混进 core_items 的起始装/鞋子剔除。
+
+    旧版抓取把 op.gg 页面上的"起始装备"当成核心装(用户看到的"多兰之弓/多兰之刃"),
+    当时的 5 个槽位其实是 [起始1, 起始2, 核心1, 核心2, 核心3]，
+    所以把 5 个槽合并后按成装规则重新挑，就能就地还原出正确的核心装。
+    """
+    stats = {"heroes": 0, "changed": 0, "dropped": 0, "short": 0}
+    for role, heroes in (build or {}).items():
+        for slug, node in (heroes or {}).items():
+            if not isinstance(node, dict):
+                continue
+            merged = (list(node.get("core_items") or [])
+                      + list(node.get("item4") or [])
+                      + list(node.get("item5") or []))
+            if not merged:
+                continue
+            stats["heroes"] += 1
+            picked = pick_build_items(merged, item_meta, limit=5)
+            before = list(node.get("core_items") or [])
+            node["core_items"] = picked[:3]
+            node["item4"] = picked[3:4]
+            node["item5"] = picked[4:5]
+            if node["core_items"] != before:
+                stats["changed"] += 1
+            stats["dropped"] += len(merged) - len(picked)
+            if len(picked) < 3:
+                stats["short"] += 1
+    return stats
+
+
+def pick_selected_shards(raw, limit=3):
+    """从属性碎片候选里挑出"选中"的那 3 个。
+
+    页面上每组(进攻/灵活/防御)会渲染全部 3 个候选, 选中的那个 img 的 class 带
+    `border border-[#bb9834]`(金色描边); 未选中是 opacity-50 grayscale。
+    raw: [{id, cls}, ...]（前 9 个候选）
+    """
+    items = [x for x in (raw or []) if isinstance(x, dict) and x.get("id")][:limit * 3]
+    out = []
+    for g in range(0, len(items), 3):
+        grp = items[g:g + 3]
+        sel = next((x for x in grp if "bb9834" in (x.get("cls") or "")), None)
+        if sel is None:
+            sel = grp[0]
+        try:
+            out.append(int(sel["id"]))
+        except (TypeError, ValueError):
+            continue
+    return out[:limit]
+
+
+def pick_depth_item(rows, item_meta=None):
+    """从 "Depth 4/5 Items Table" 的行里取第一件成装(每行 1 件, 按选用率排序)。"""
+    for row in rows or []:
+        for iid in row:
+            if iid and not is_starting_item(iid, item_meta):
+                return int(iid) if str(iid).isdigit() else iid
+    return None
+
+
+def parse_build_payload(data, item_meta=None):
+    """把 build 页 JS 抓到的原始数据解析成 build_data.json 里的结构。
+
+    item_meta: Data Dragon 的物品表(含 gold/tags), 用来剔除起始装/鞋子/消耗品。
+    """
     result = {"runes": {}, "spells": [], "skill_order": [], "skill_master": [],
               "core_items": [], "item4": [], "item5": [], "combos": []}
     if not data:
@@ -588,7 +1048,12 @@ def parse_build_payload(data):
         result["runes"]["sub"] = style_ids[1] if len(style_ids) >= 2 else None
     if perk_ids:
         result["runes"]["perks"] = perk_ids[:6]
-        result["runes"]["shards"] = perk_ids[6:9] if len(perk_ids) > 6 else []
+        # 碎片优先用"页面上真正选中的那 3 个", 取不到才回退到图片顺序
+        shards = pick_selected_shards(data.get("shardCandidates"))
+        if shards:
+            result["runes"]["shards"] = shards
+        else:
+            result["runes"]["shards"] = perk_ids[6:9] if len(perk_ids) > 6 else []
 
     spell_ids = []
     for sn in data.get("foundSpells", []) or []:
@@ -606,11 +1071,45 @@ def parse_build_payload(data):
         result["skill_master"] = [k for k, v in cnt.most_common(3)]
 
     item_ids = [x.get("id") for x in data.get("items", []) if x.get("id")]
-    real_items = [i for i in item_ids if i not in CONSUMABLES and i not in BOOT_IDS]
-    if real_items:
-        result["core_items"] = real_items[:3]
-        result["item4"] = real_items[3:4]
-        result["item5"] = real_items[4:5]
+    tables = data.get("itemTables") or {}
+    # 核心装优先用 "Builds Table"(每行是一套 3 件的成装方案)
+    core_rows = tables.get("core") or []
+    core_from_table = None
+    for row in core_rows:
+        cand = [i for i in row if i and not is_starting_item(i, item_meta)]
+        if len(cand) >= 2:
+            core_from_table = cand[:3]
+            break
+    if not core_from_table:
+        picked = pick_build_items(item_ids, item_meta)
+        core_from_table = picked[:3] if picked else None
+    if core_from_table:
+        result["core_items"] = core_from_table
+    # 第 4/5 件: 从 "Depth 4/5 Items Table" 每行取第一件(按选用率排序)
+    d4 = pick_depth_item(tables.get("depth4"), item_meta)
+    d5 = pick_depth_item(tables.get("depth5"), item_meta)
+    if d4:
+        result["item4"] = [d4]
+    if d5:
+        result["item5"] = [d5]
+
+    # ---- description 优先(服务端生成的固定格式, 比 DOM 顺序可靠) ----
+    desc_info = parse_build_desc(data.get("desc"))
+    if len(desc_info["core_names"]) >= 2:
+        by_name = [item_id_by_name(item_meta, n) for n in desc_info["core_names"]]
+        # description 里也会写起始装(如"女神之泪 → 时光之杖 → …"), 同样要剔掉
+        by_name = [i for i in by_name if i and not is_starting_item(i, item_meta)]
+        if len(by_name) >= 2:
+            result["core_items"] = by_name[:3]
+    if len(desc_info["spells"]) == 2:
+        ids = [SPELL_NAME_MAP.get(desc_info["spells"][0]), SPELL_NAME_MAP.get(desc_info["spells"][1])]
+        if all(ids):
+            result["spells"] = ids
+    if desc_info["skill_master"]:
+        result["skill_master"] = desc_info["skill_master"]
+    # 保留页面 description 原文, 方便事后审计"这条数据是不是 op.gg 页面自己写的"
+    if data.get("desc"):
+        result["_desc"] = str(data["desc"])[:400]
 
     seen = set()
     for seq in data.get("combos", []) or []:
@@ -728,17 +1227,42 @@ def find_chromium():
     return None
 
 
-def launch_kwargs():
+DOH_ARGS = [
+    "--enable-features=DnsOverHttps",
+    "--dns-over-https-templates=https://1.1.1.1/dns-query",
+    "--dns-over-https-mode=secure",
+]
+
+
+def launch_kwargs(use_doh=False):
     kw = {
         "headless": True,
         "args": ["--no-sandbox", "--disable-setuid-sandbox",
                  "--disable-blink-features=AutomationControlled",
                  "--disable-dev-shm-usage", "--disable-gpu"],
     }
+    if use_doh:
+        # 本机 DNS 解析不了 op.gg 时, 让浏览器自己走 DoH(Cloudflare)
+        kw["args"] = kw["args"] + DOH_ARGS
     exe = find_chromium()
     if exe:
         kw["executable_path"] = exe
     return kw
+
+
+def needs_doh(args):
+    """base 是 op.gg 且本机 DNS 解析失败时, 自动改用 DoH。"""
+    if getattr(args, "doh", False):
+        return True
+    if "op.gg" not in (getattr(args, "base_url", "") or ""):
+        return False
+    try:
+        import socket
+        socket.getaddrinfo("op.gg", 443)
+        return False
+    except Exception:
+        print("[!] 本机 DNS 解析 op.gg 失败，自动改用 DoH(1.1.1.1) 解析（可用 --doh 强制）")
+        return True
 
 
 async def install_blocker(page, block=True):
@@ -843,11 +1367,12 @@ class Stats:
 
 # ======================== 抓取核心 ========================
 class Scraper:
-    def __init__(self, args, name_to_key, champ_by_slug):
+    def __init__(self, args, name_to_key, champ_by_slug, item_meta=None):
         self.args = args
         self.base = args.base_url.rstrip("/")
         self.name_to_key = name_to_key
         self.champ_by_slug = champ_by_slug
+        self.item_meta = item_meta or {}
         self.page_timeout = args.page_timeout
         self.retries = max(1, args.retries)
         self.min_delay = args.min_delay
@@ -858,6 +1383,10 @@ class Scraper:
         self._blocked_streak = 0
         self._pause_until = 0.0
         self.pauses = 0
+        # build 页 description 与解析结果不一致的次数(运行时自检)
+        self.desc_issues = 0
+        # 页面实际返回的版本号统计（如 {"16.23": 193}）
+        self.versions = {}
 
     def _note_blocked(self):
         self._blocked_streak += 1
@@ -906,6 +1435,9 @@ class Scraper:
                 await page_ref.goto(task.url, wait_until="domcontentloaded",
                                     timeout=self.page_timeout * 1000)
                 probe = await self._probe(page_ref)
+                page_patch = parse_page_patch(probe.get("title"))
+                if page_patch:
+                    self.versions[page_patch] = self.versions.get(page_patch, 0) + 1
                 if is_blocked_text(probe.get("head", ""), probe.get("title", "")):
                     self._note_blocked()
                     last_reason = "blocked (403/challenge)"
@@ -968,7 +1500,14 @@ class Scraper:
                                       elapsed=time.time() - t0)
                     last_reason = f"no tier rows (DOM rows={len(payload.get('rows') or [])})"
                 else:
-                    parsed = parse_build_payload(payload)
+                    parsed = parse_build_payload(payload, self.item_meta)
+                    if page_patch:
+                        parsed["_patch"] = page_patch
+                    issues = check_desc_consistency(payload.get("desc"), parsed, self.item_meta)
+                    if issues:
+                        self.desc_issues += 1
+                        if self.desc_issues <= 8:
+                            print(f"  [自检] {task.tag()}: {'; '.join(issues)}")
                     has_data = bool(parsed["runes"].get("perks") or parsed["core_items"]
                                     or parsed["skill_order"] or parsed["spells"])
                     if has_data:
@@ -1132,7 +1671,13 @@ def make_build_applier(data):
         t = res.task
         if res.status != "ok":
             return
-        data.setdefault(t.role, {})[t.slug] = res.data
+        role_node = data.setdefault(t.role, {})
+        old = role_node.get(t.slug) or {}
+        new = res.data
+        # 连招是 gen_combos.py 生成的, 重抓出装时不能把它冲掉
+        if not new.get("combos") and old.get("combos"):
+            new["combos"] = old["combos"]
+        role_node[t.slug] = new
     return apply
 
 
@@ -1214,20 +1759,48 @@ async def async_main(args):
         return
 
     # 元数据(build 需要; --only meta 可单独重生成)
+    item_meta = {}
     if ({"build"} & only or "meta" in only) and not args.no_meta and not args.offline:
         try:
             meta = fetch_meta()
             save_json_atomic(OUT_META, meta)
+            item_meta = meta.get("items") or {}
             print(f"[+] 元数据 -> {OUT_META}")
         except Exception as e:
             print(f"[!] 元数据下载失败(继续抓取): {e}")
             if only == {"meta"}:
                 return
+    if not item_meta:
+        # 没有新下载就用已有的 meta.json(起始装/鞋子过滤需要 gold/tags)
+        item_meta = (load_json(OUT_META, {}) or {}).get("items") or {}
+        if item_meta and "build" in only:
+            print(f"[*] 使用本地 meta.json 的物品表({len(item_meta)} 件)过滤起始装/鞋子")
     if only == {"meta"}:
         print("[*] 仅更新 meta.json，完成(未抓取任何页面)。")
         return
 
-    scraper = Scraper(args, name_to_key, champ_by_slug)
+    scraper = Scraper(args, name_to_key, champ_by_slug, item_meta=item_meta)
+
+    # ---------- 版本(patch) ----------
+    # op.gg 支持 &patch=16.22 选历史版本; 国服落后时用本机客户端版本抓 cn 数据。
+    local_patch = None
+    if (args.cn_patch in (None, "auto")) and ("cn" in active_regions.values()):
+        local_patch = detect_local_patch(deep=args.deep_scan)
+        if local_patch:
+            print(f"[*] 检测到本机国服客户端版本: {local_patch}")
+        else:
+            print("[*] 未检测到本机国服客户端版本，cn 数据将按 op.gg 默认版本抓取")
+    patches = {}
+    for region in active_regions.values():
+        if args.patch:
+            patches[region] = args.patch
+        elif region == "cn":
+            patches[region] = args.cn_patch if args.cn_patch not in (None, "auto") else local_patch
+        else:
+            patches[region] = None
+    if any(patches.values()):
+        print("[*] 版本: " + ", ".join(f"{r}={p}" for r, p in patches.items() if p))
+    meta_versions = {}
 
     # ---------- 任务清单 ----------
     # --fresh: 忽略进度(全部重抓), 但只在"全量范围"下才清空已有数据;
@@ -1243,13 +1816,18 @@ async def async_main(args):
                 for region in active_regions.values():
                     for tier in active_tiers.values():
                         counter_tasks.append(Task("counter", role, c["slug"], region, tier,
-                                                  url_counter(scraper.base, c["slug"], role, region, tier)))
+                                                  url_counter(scraper.base, c["slug"], role,
+                                                              region, tier,
+                                                              patches.get(region))))
     if "build" in only:
+        # build 页是"全部服务器"口径, 没有地区之分, 只用全局 --patch
+        build_patch = args.patch
         for role in roles:
             for c in role_heroes.get(role, []):
                 if not args.fresh and progress.is_done(f"build/{role}/{c['slug']}"):
                     continue
-                build_tasks.append(Task("build", role, c["slug"], url=url_build(scraper.base, c["slug"], role)))
+                build_tasks.append(Task("build", role, c["slug"],
+                                        url=url_build(scraper.base, c["slug"], role, build_patch)))
     if "tier" in only:
         for role in roles:
             for region in active_regions.values():
@@ -1257,7 +1835,8 @@ async def async_main(args):
                     if not args.fresh and progress.is_done(f"tier/{role}/{region}/{tier}"):
                         continue
                     tier_tasks.append(Task("tier", role, "", region, tier,
-                                           url_tier(scraper.base, role, region, tier)))
+                                           url_tier(scraper.base, role, region, tier,
+                                                    patches.get(region))))
 
     total_tasks = len(counter_tasks) + len(build_tasks) + len(tier_tasks)
     if not total_tasks:
@@ -1268,8 +1847,9 @@ async def async_main(args):
           f"并发={args.concurrency}, 单页超时={args.page_timeout}s, 重试={args.retries}")
 
     from playwright.async_api import async_playwright
+    use_doh = needs_doh(args)
     pw = await async_playwright().start()
-    browser = await pw.chromium.launch(**launch_kwargs())
+    browser = await pw.chromium.launch(**launch_kwargs(use_doh))
     ctx = await browser.new_context(user_agent=UA, locale="zh-CN",
                                     viewport={"width": 1600, "height": 900})
 
@@ -1339,6 +1919,26 @@ async def async_main(args):
     await browser.close()
     await pw.stop()
 
+    if build_tasks:
+        if scraper.desc_issues == 0:
+            print("[自检] build 页 description 与解析结果全部一致 "
+                  "(核心装/召唤师技能已按页面口径校验)")
+        else:
+            print(f"[自检] {scraper.desc_issues} 个 build 页的 description 与解析结果不一致 "
+                  f"(详见上面的 [自检] 行)")
+
+    # 记录本次数据实际来自哪个版本（页面标题里的 "16.23 版本"）
+    if scraper.versions:
+        main_ver = max(scraper.versions, key=scraper.versions.get)
+        meta = load_json(OUT_META, {}) or {}
+        meta["version"] = main_ver
+        meta["versions"] = scraper.versions
+        meta["patch_by_region"] = {k: v for k, v in patches.items() if v}
+        save_json_atomic(OUT_META, meta)
+        detail = ", ".join(f"{v}×{n}" for v, n in scraper.versions.items())
+        print(f"[版本] 实际抓到的数据版本: {detail}"
+              + (f"（指定: {meta['patch_by_region']}）" if meta["patch_by_region"] else ""))
+
     print(f"\n[+] 全部完成! 用时 {time.time() - START_TS:.1f}s")
 
 
@@ -1379,6 +1979,16 @@ def build_parser():
     ap.add_argument("--base-url", default=DEFAULT_BASE, help="站点根地址(测试可指向本地 mock)")
     ap.add_argument("--no-block", action="store_true", help="不拦截图片/样式等资源")
     ap.add_argument("--no-meta", action="store_true", help="跳过 Data Dragon 元数据下载")
+    ap.add_argument("--patch", help="强制指定 op.gg 版本，例如 16.22（默认跟随最新）")
+    ap.add_argument("--cn-patch", default="auto",
+                    help="国服(cn)数据用哪个版本：auto=读本机客户端（默认），"
+                         "也可直接给 16.22，或 none 表示用 op.gg 默认")
+    ap.add_argument("--deep-scan", action="store_true",
+                    help="探测本机客户端时扫所有盘符的常见目录（慢一点，但装在哪都能找到）")
+    ap.add_argument("--detect-client", action="store_true",
+                    help="只探测本机 LOL 客户端位置与版本并退出")
+    ap.add_argument("--doh", action="store_true",
+                    help="浏览器改用 DoH(1.1.1.1) 解析域名（本机 DNS 解析不了 op.gg 时用）")
     ap.add_argument("--data-dir", default=HERE, help="数据输出目录(默认脚本所在目录)")
     ap.add_argument("--offline", action="store_true",
                     help="离线: 不访问 Data Dragon, 直接用本地 champions.json (测试用)")
@@ -1392,6 +2002,38 @@ def main():
     args = build_parser().parse_args()
     if args.data_dir:
         set_data_dir(args.data_dir)
+
+    # ---- 只探测客户端 ----
+    if args.detect_client:
+        roots = registry_install_roots()
+        drives = drive_letters()
+        cands = candidate_client_paths(roots, os.environ, drives, args.deep_scan)
+        existing = [p for p in cands if os.path.isfile(p)]
+        print(f"[*] 盘符: {', '.join(d.rstrip(chr(92)) for d in drives)}")
+        print(f"[*] 注册表/安装清单找到的安装根: {roots or '（无）'}")
+        print(f"[*] 候选 exe {len(cands)} 个，实际存在 {len(existing)} 个"
+              + ("（含 --deep-scan）" if args.deep_scan else "（可加 --deep-scan 扫盘）"))
+        for p in existing[:10]:
+            print(f"    {p}  -> 版本 {_pe_file_version(p) or '读取失败'}")
+        ver, path = find_local_client(deep=args.deep_scan)
+        print(f"[+] 探测结果: 版本={ver or '未找到'}  路径={path or '-'}")
+        if not ver:
+            print("    没找到客户端时可用 --cn-patch 16.22 手动指定国服版本")
+        return
+
+    # ---- 就地修正出装: 不需要网络/浏览器 ----
+    if args.only and "fix-items" in [x.strip() for x in args.only.split(",")]:
+        build = load_json(OUT_BUILD, {}) or {}
+        meta_items = (load_json(OUT_META, {}) or {}).get("items") or {}
+        if not meta_items:
+            sys.exit(f"[!] 需要 {OUT_META}（含 gold/tags）才能判断起始装；"
+                     f"先跑 python scrape.py --only meta")
+        st = repair_build_items(build, meta_items)
+        save_json_atomic(OUT_BUILD, build)
+        print(f"[+] 出装修正完成: 检查 {st['heroes']} 个英雄，改写 {st['changed']} 个，"
+              f"剔除起始装/鞋子/消耗品 {st['dropped']} 件")
+        print(f"    写入 {OUT_BUILD}")
+        return
 
     # ---- debug: 单英雄, 顺序跑一遍并 dump ----
     if args.debug:
@@ -1455,7 +2097,7 @@ def _debug_run(args, slug, role, name_to_key, champ_by_slug, by_key):
     extractor = {"counter": EXTRACT_COUNTER_JS, "build": EXTRACT_BUILD_JS, "tier": EXTRACT_TIER_JS}
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(**launch_kwargs())
+        browser = p.chromium.launch(**launch_kwargs(needs_doh(args)))
         ctx = browser.new_context(user_agent=UA, locale="zh-CN",
                                   viewport={"width": 1600, "height": 900})
         page = ctx.new_page()

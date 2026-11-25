@@ -69,11 +69,25 @@
       d.onclick = () => {
         state.role = r.id;
         state.oppKey = null;
-        state.buildHeroKey = null;
         state.buildRole = r.id;
+        state.buildHeroKey = null;
         renderLanes();
-        renderMainTab();
-        $("#buildCard").classList.add("hidden");
+
+        if (state.mainTab === "build") {
+          // 在"符文出装"页切分路: 刷新英雄列表, 并直接展示该分路第一个英雄
+          renderBuildGrid();
+          const firstKey = (LANE_POOL[r.id] || [])[0];
+          if (firstKey && byKey[firstKey]) {
+            state.buildHeroKey = firstKey;
+            renderBuild();
+            $("#buildCard").classList.remove("hidden");
+          } else {
+            $("#buildCard").classList.add("hidden");
+          }
+        } else {
+          renderMainTab();
+          $("#buildCard").classList.add("hidden");
+        }
       };
       box.appendChild(d);
     });
@@ -110,6 +124,17 @@
       $("#tabTier").classList.add("hidden");
       $("#tabBuild").classList.remove("hidden");
       renderBuildGrid();
+      // 进入"符文出装"页时, 让分路下拉与当前分路保持一致
+      const roleSel = $("#buildRoleSel");
+      if (roleSel) roleSel.value = state.role || "support";
+      // 切换回来时, 若之前看的英雄不属于当前分路, 收起详情卡; 否则按当前分路重绘
+      const pool = LANE_POOL[state.role] || [];
+      if (state.buildHeroKey && !pool.includes(state.buildHeroKey)) {
+        state.buildHeroKey = null;
+        $("#buildCard").classList.add("hidden");
+      } else if (state.buildHeroKey) {
+        renderBuild();
+      }
     }
   }
 
@@ -454,7 +479,7 @@
     let html = '<div class="build-panel">';
 
     // ---- 符文 (OP.GG 风格布局) ----
-    html += '<div class="build-row"><div class="build-block" style="flex:2;min-width:340px"><div class="lbl">🎯 符文</div>';
+    html += '<div class="build-row"><div class="build-block" style="flex:2 1 320px;min-width:0"><div class="lbl">🎯 符文</div>';
     if (build.runes && (build.runes.primary || (build.runes.perks || []).length)) {
       const rt = build.runes;
       // 去重 (OP.GG 页面有时同一符文出现在多个 DOM 位置)
