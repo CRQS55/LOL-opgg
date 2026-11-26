@@ -22,6 +22,11 @@ import os
 import re
 import sys
 
+try:  # 连招文本归一化（同目录模块），缺失时降级为不处理
+    import combo_text as ct
+except ImportError:  # pragma: no cover
+    ct = None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 TEMPLATE = os.path.join(HERE, "template.html")
@@ -46,6 +51,38 @@ ROLE_HEADERS = {
 def load(path):
     with open(path, encoding="utf-8") as f:
         return f.read()
+
+
+def normalize_build_combos(data):
+    """出成品前统一清洗连招：AA/auto attack -> 平A、去掉英文括注、箭头统一。
+
+    返回被丢弃的空连招条数。
+    """
+    if ct is None or not data:
+        return 0
+    dropped = 0
+    for role, heroes in data.items():
+        for slug, node in (heroes or {}).items():
+            if not isinstance(node, dict):
+                continue
+            combos = node.get("combos") or []
+            if not combos:
+                continue
+            cleaned = ct.normalize_combos(combos)
+            dropped += max(0, len(combos) - len(cleaned))
+            node["combos"] = cleaned
+
+
+def strip_internal_fields(data):
+    """去掉只给审计用、前端不需要的字段（如页面 description 原文 _desc）。"""
+    n = 0
+    for role, heroes in (data or {}).items():
+        for slug, node in (heroes or {}).items():
+            if isinstance(node, dict) and "_desc" in node:
+                node.pop("_desc", None)
+                n += 1
+    return n
+    return dropped
 
 
 def load_json_opt(path, label):
@@ -166,6 +203,23 @@ def main():
     build_data = load_json_opt(BUILD, "build_data.json") or {}
     tier_data = load_json_opt(TIER, "tier_data.json") or {}
     meta = load_json_opt(META, "meta.json") or {}
+
+    if build_data:
+        dropped = normalize_build_combos(build_data)
+        stripped = strip_internal_fields(build_data)
+        print(f"  [*] 连招文本已归一化（AA/auto attack -> 平A、英文括注清理）"
+              + (f"，丢弃空连招 {dropped} 条" if dropped else "")
+              + (f"，剔除内部字段 {stripped} 处" if stripped else ""))
+        ver = (meta or {}).get("version")
+        if ver:
+            pbr = (meta or {}).get("patch_by_region") or {}
+            print(f"  [*] 数据版本: {ver}"
+                  + (f"（" + ", ".join(f"{k}={v}" for k, v in pbr.items()) + "）" if pbr else ""))
+
+    # meta 里的 gold/tags 只给抓取脚本用, 不进成品, 避免 index.html 白白变大
+    if meta.get("items"):
+        meta["items"] = {k: {"name": v.get("name", k), "icon": v.get("icon", "")}
+                         for k, v in meta["items"].items()}
 
     if os.path.exists(LANES):
         pool, unmatched = parse_lanes(load(LANES), champs)
